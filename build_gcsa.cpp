@@ -67,20 +67,34 @@ main(int argc, char** argv)
     std::cerr << "  -d N  Doubling steps (default and max " << ConstructionParameters::DOUBLING_STEPS << ")" << std::endl;
     std::cerr << "  -D X  Use X as the directory for temporary files (default: " << TempFile::DEFAULT_TEMP_DIR << ")" << std::endl;
     std::cerr << "  -l N  Limit the size of the graph to N gigabytes (default " << ConstructionParameters::SIZE_LIMIT << ")" << std::endl;
+    std::cerr << "  -m X  Use the node mapping specified by X (default: " << ConstructionParameters::mappingName(ConstructionParameters::DEFAULT_MAPPING) << ")" << std::endl;
+    std::cerr << "  -M X  Use X as a parameter for node mapping" << std::endl;
     std::cerr << "  -o X  Use X as the base name for output (default: the first input)" << std::endl;
     std::cerr << "  -t    Read the input in text format" << std::endl;
     std::cerr << "  -T N  Set the number of threads to N (default and max " << omp_get_max_threads() << " on this system)" << std::endl;
     std::cerr << "  -v    Verify the index by querying it with the kmers" << std::endl;
     std::cerr << "  -V N  Set verbosity level to N (default " << Verbosity::DEFAULT << ")" << std::endl;
     std::cerr << std::endl;
+
+    std::cerr << "Node mappings:" << std::endl;
+    std::cerr << std::endl;
+    std::cerr << ConstructionParameters::mappingName(ConstructionParameters::identity_mapping) << std::endl;
+    std::cerr << "  Use node identifiers as node values" << std::endl;
+    std::cerr << std::endl;
+    std::cerr << ConstructionParameters::mappingName(ConstructionParameters::duplicate_mapping) << std::endl;
+    std::cerr << "  Map duplicated nodes to the original nodes" << std::endl;
+    std::cerr << "  Requires the largest original graph node identifier as a parameter" << std::endl;
+    std::cerr << std::endl;
+
     std::exit(EXIT_SUCCESS);
   }
 
   int c = 0;
   bool binary = true, verify = false;
   std::string index_file, lcp_file;
+  std::string mapping_parameter;
   ConstructionParameters parameters;
-  while((c = getopt(argc, argv, "bB:d:D:l:o:tT:vV:")) != -1)
+  while((c = getopt(argc, argv, "bB:d:D:l:m:M:o:tT:vV:")) != -1)
   {
     switch(c)
     {
@@ -94,6 +108,10 @@ main(int argc, char** argv)
       TempFile::setDirectory(optarg); break;
     case 'l':
       parameters.setLimit(std::stoul(optarg)); break;
+    case 'm':
+      parameters.setMapping(ConstructionParameters::mappingType(optarg)); break;
+    case 'M':
+      mapping_parameter = optarg; break;
     case 'o':
       index_file = std::string(optarg) + GCSA::EXTENSION;
       lcp_file = std::string(optarg) + LCPArray::EXTENSION;
@@ -112,6 +130,7 @@ main(int argc, char** argv)
       std::exit(EXIT_FAILURE);
     }
   }
+  parameters.setMappingParameter(mapping_parameter);
   if(optind >= argc)
   {
     std::cerr << "build_gcsa: No input files specified" << std::endl;
@@ -133,10 +152,15 @@ main(int argc, char** argv)
     else { std::cout << InputGraph::TEXT_EXTENSION << " (text format)" << std::endl; }
   }
   printHeader("Output", INDENT); std::cout << index_file << ", " << lcp_file << std::endl;
+  std::cout << std::endl;
+
   printHeader("Doubling steps", INDENT); std::cout << parameters.doubling_steps << std::endl;
-  printHeader("Size limit", INDENT); std::cout << inGigabytes(parameters.size_limit) << " GB" << std::endl;
+  printHeader("Node mapping", INDENT); std::cout << parameters.getMapping() << std::endl;
   printHeader("Branching factor", INDENT); std::cout << parameters.lcp_branching << std::endl;
+  std::cout << std::endl;
+
   printHeader("Threads", INDENT); std::cout << omp_get_max_threads() << std::endl;
+  printHeader("Size limit", INDENT); std::cout << inGigabytes(parameters.size_limit) << " GB" << std::endl;
   printHeader("Temp directory", INDENT); std::cout << TempFile::temp_dir << std::endl;
   printHeader("Verbosity", INDENT); std::cout << Verbosity::levelName() << std::endl;
   std::cout << std::endl;

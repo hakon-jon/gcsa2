@@ -38,19 +38,33 @@ namespace gcsa
 
 struct ConstructionParameters
 {
-  const static size_type DOUBLING_STEPS = 3;
-  const static size_type SIZE_LIMIT     = 500;    // Gigabytes.
-  const static size_type ABSOLUTE_LIMIT = 16384;  // Gigabytes.
-  const static size_type LCP_BRANCHING  = 64;
+  enum mapping_type { identity_mapping, duplicate_mapping };
+
+  const static size_type    DOUBLING_STEPS   = 3;
+  const static size_type    SIZE_LIMIT       = 500;   // Gigabytes.
+  const static size_type    ABSOLUTE_LIMIT   = 16384; // Gigabytes.
+  const static size_type    LCP_BRANCHING    = 64;
+  const static mapping_type DEFAULT_MAPPING  = identity_mapping;
+  const static size_type    DEFAULT_MAX_NODE = ((size_type)1 << 53) - 2;  // Modulo becomes ~0.
 
   ConstructionParameters();
   void setSteps(size_type steps);
   void setLimit(size_type gigabytes);
   void setLCPBranching(size_type factor);
 
-  size_type doubling_steps;
-  size_type size_limit;
-  size_type lcp_branching;
+  void setMapping(mapping_type new_mapping);
+  void setMappingParameter(size_type parameter);
+  void setMappingParameter(const std::string& parameter);
+  std::string getMapping() const;
+
+  static std::string mappingName(mapping_type mapping);
+  static mapping_type mappingType(const std::string& mapping);
+
+  size_type    doubling_steps;
+  size_type    size_limit;
+  size_type    lcp_branching;
+  mapping_type node_mapping;
+  size_type    max_node;
 };
 
 //------------------------------------------------------------------------------
@@ -379,6 +393,30 @@ struct Node
   inline static size_type id(node_type node) { return node >> ID_OFFSET; }
   inline static bool rc(node_type node) { return node & ORIENTATION_MASK; }
   inline static size_type offset(node_type node) { return node & OFFSET_MASK; }
+};
+
+//------------------------------------------------------------------------------
+
+/*
+  Node mappings map the node identifiers used in prefix-doubling to the values returned
+  by a locate() query. The following mappings have been implemented:
+
+    NodeIdentityMapping   Use the identifiers as values (default)
+    NodeDuplicateMapping  Maps the duplicated nodes in haplotype paths to the originals
+*/
+
+struct NodeIdentityMapping
+{
+  inline node_type operator() (node_type identifier) const { return identifier; }
+};
+
+struct NodeDuplicateMapping
+{
+  node_type modulo;
+
+  explicit NodeDuplicateMapping(size_type max_node) : modulo((max_node + 1) << Node::ID_OFFSET) {}
+
+  inline node_type operator() (node_type identifier) const { return identifier % this->modulo; }
 };
 
 //------------------------------------------------------------------------------

@@ -22,6 +22,8 @@
   SOFTWARE.
 */
 
+#include <sstream>
+
 #include <gcsa/support.h>
 
 namespace gcsa
@@ -31,7 +33,8 @@ namespace gcsa
 
 ConstructionParameters::ConstructionParameters() :
   doubling_steps(DOUBLING_STEPS), size_limit(SIZE_LIMIT * GIGABYTE),
-  lcp_branching(LCP_BRANCHING)
+  lcp_branching(LCP_BRANCHING),
+  node_mapping(DEFAULT_MAPPING), max_node(DEFAULT_MAX_NODE)
 {
 }
 
@@ -51,6 +54,66 @@ void
 ConstructionParameters::setLCPBranching(size_type factor)
 {
   this->lcp_branching = std::max((size_type)2, factor);
+}
+
+void
+ConstructionParameters::setMapping(mapping_type new_mapping)
+{
+  this->node_mapping = new_mapping;
+}
+
+void
+ConstructionParameters::setMappingParameter(size_type parameter)
+{
+  if(this->node_mapping == duplicate_mapping)
+  {
+    this->max_node = std::max((size_type)1, parameter);
+  }
+}
+
+void
+ConstructionParameters::setMappingParameter(const std::string& parameter)
+{
+  if(this->node_mapping == duplicate_mapping)
+  {
+    this->setMappingParameter(std::stoul(parameter));
+  }
+}
+
+std::string
+ConstructionParameters::getMapping() const
+{
+  std::ostringstream s;
+  s << mappingName(this->node_mapping);
+  if(this->node_mapping == duplicate_mapping)
+  {
+    s << "(" << this->max_node << ")";
+  }
+  return s.str();
+}
+
+std::string
+ConstructionParameters::mappingName(ConstructionParameters::mapping_type mapping)
+{
+  switch(mapping)
+  {
+  case identity_mapping:
+    return "identity";
+  case duplicate_mapping:
+    return "duplicate";
+  default:
+    return "unknown";
+  }
+}
+
+ConstructionParameters::mapping_type
+ConstructionParameters::mappingType(const std::string& mapping)
+{
+  if(mapping == "identity") { return identity_mapping; }
+  if(mapping == "duplicate") { return duplicate_mapping; }
+
+  std::cerr << "ConstructionParameters::mappingType(): Unknown mapping type: " << mapping << std::endl;
+  return DEFAULT_MAPPING;
 }
 
 //------------------------------------------------------------------------------
