@@ -986,13 +986,15 @@ PathGraph::read(std::vector<PathNode>& paths, std::vector<PathNode::rank_type>& 
 
 const std::string MergedGraph::PREFIX = ".gcsa";
 
+template<class NodeMapping>
 struct SameFromSet
 {
   const PathGraphMerger& merger;
+  const NodeMapping& mapping;
   std::vector<node_type> nodes, buffer;
 
-  SameFromSet(const PathGraphMerger& source) :
-    merger(source)
+  SameFromSet(const PathGraphMerger& source, const NodeMapping& node_mapping) :
+    merger(source), mapping(node_mapping)
   {
   }
 
@@ -1003,7 +1005,7 @@ struct SameFromSet
     for(size_type i = range.first; i <= range.second; i++)
     {
       node_type curr = this->merger.buffer[i].node.from;
-      if(curr != prev) { to.push_back(curr); prev = curr; }
+      if(curr != prev) { this->mapping.add(to, curr); prev = curr; }
     }
     if(to.size() > 1) { removeDuplicates(to, false); }
   }
@@ -1027,7 +1029,8 @@ struct SameFromSet
   }
 };
 
-MergedGraph::MergedGraph(const PathGraph& source, const DeBruijnGraph& mapper, const LCP& kmer_lcp, size_type size_limit) :
+MergedGraph::MergedGraph(const PathGraph& source, const DeBruijnGraph& mapper, const LCP& kmer_lcp,
+  const ConstructionParameters& parameters) :
   path_name(TempFile::getName(PREFIX)), rank_name(TempFile::getName(PREFIX)),
   from_name(TempFile::getName(PREFIX)), lcp_name(TempFile::getName(PREFIX)),
   path_count(0), rank_count(0), from_count(0),
@@ -1052,7 +1055,8 @@ MergedGraph::MergedGraph(const PathGraph& source, const DeBruijnGraph& mapper, c
   this->next_from[mapper.alpha.sigma] = ~(size_type)0;
 
   PathGraphMerger merger(source, kmer_lcp);
-  SameFromSet same_from_set(merger);
+  NodeIdentityMapping node_mapping;
+  SameFromSet<NodeIdentityMapping> same_from_set(merger, node_mapping);
   size_type curr_comp = 0;  // Used to transform next.
 
   size_type bytes = 0;
@@ -1067,7 +1071,7 @@ MergedGraph::MergedGraph(const PathGraph& source, const DeBruijnGraph& mapper, c
 
     // Write the actual data
     bytes += curr.node.bytes() + (same_from_set.nodes.size() - 1) * sizeof(range_type) + 1;
-    if(bytes > size_limit)
+    if(bytes > parameters.size_limit)
     {
       std::cerr << "MergedGraph::MergedGraph(): Size limit exceeded, construction aborted" << std::endl;
       std::exit(EXIT_FAILURE);

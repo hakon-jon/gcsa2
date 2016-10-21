@@ -501,7 +501,7 @@ GCSA::GCSA(InputGraph& graph, const ConstructionParameters& parameters)
   {
     std::cerr << "GCSA::GCSA(): Merging the paths" << std::endl;
   }
-  MergedGraph merged_graph(path_graph, mapper, lcp, parameters.size_limit);
+  MergedGraph merged_graph(path_graph, mapper, lcp, parameters);
   this->header.path_nodes = merged_graph.size();
   this->header.order = merged_graph.k();
   path_graph.clear();

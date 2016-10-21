@@ -407,7 +407,10 @@ struct Node
 
 struct NodeIdentityMapping
 {
-  inline node_type operator() (node_type identifier) const { return identifier; }
+  inline void add(std::vector<node_type>& nodes, node_type identifier) const
+  {
+    nodes.push_back(identifier);
+  }
 };
 
 struct NodeDuplicateMapping
@@ -416,7 +419,10 @@ struct NodeDuplicateMapping
 
   explicit NodeDuplicateMapping(size_type max_node) : modulo((max_node + 1) << Node::ID_OFFSET) {}
 
-  inline node_type operator() (node_type identifier) const { return identifier % this->modulo; }
+  inline void add(std::vector<node_type>& nodes, node_type identifier) const
+  {
+    nodes.push_back(identifier % this->modulo);
+  }
 };
 
 //------------------------------------------------------------------------------
