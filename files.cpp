@@ -428,21 +428,45 @@ InputGraph::readKeys(std::vector<key_type>& keys) const
   }
 }
 
+template<class NodeMapping>
 void
-InputGraph::readFrom(std::vector<node_type>& from_nodes) const
+readFromNodes(const InputGraph& graph, std::vector<node_type>& from_nodes, const NodeMapping& node_mapping)
+{
+  for(size_type file = 0; file < graph.files(); file++)
+  {
+    std::vector<KMer> kmers;
+    graph.read(kmers, file, false);
+    for(size_type i = 0; i < graph.sizes[file]; i++)
+    {
+      node_mapping.add(from_nodes, kmers[i].from);
+    }
+  }
+}
+
+/*
+  FIXME: If we implement node mappings that may produce multiple from nodes for a KMer, we
+  need a better way for estimating the size of the from_nodes vector.
+*/
+void
+InputGraph::readFrom(std::vector<node_type>& from_nodes, const ConstructionParameters& parameters) const
 {
   sdsl::util::clear(from_nodes);
   from_nodes.reserve(this->size());
 
-  // Read the from nodes.
-  for(size_type file = 0; file < this->files(); file++)
+  if(parameters.node_mapping == ConstructionParameters::identity_mapping)
   {
-    std::vector<KMer> kmers;
-    this->read(kmers, file, false);
-    for(size_type i = 0; i < this->sizes[file]; i++)
-    {
-      from_nodes.push_back(kmers[i].from);
-    }
+    NodeIdentityMapping node_mapping;
+    readFromNodes(*this, from_nodes, node_mapping);
+  }
+  else if(parameters.node_mapping == ConstructionParameters::duplicate_mapping)
+  {
+    NodeDuplicateMapping node_mapping(parameters.max_node);
+    readFromNodes(*this, from_nodes, node_mapping);
+  }
+  else
+  {
+    std::cerr << "InputGraph::readFrom(): Invalid node mapping: " << parameters.node_mapping << std::endl;
+    std::exit(EXIT_FAILURE);
   }
   removeDuplicates(from_nodes, true);
 

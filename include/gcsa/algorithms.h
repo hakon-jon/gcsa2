@@ -42,16 +42,20 @@ namespace gcsa
   the list of occurrences is expected to be the same as the set of start nodes of the
   kmers with that label. To guarantee this, the input should be the same as for the
   constructor, or a subset where all kmers with a given label are either present or
-  absent. Counting queries are also verified.
+  absent.
 
-  If lcp != 0, parent() queries are also verified.
+  Counting queries are also verified. If lcp != 0, parent() queries are also verified.
+  The ConstructionParameters object is used to determine the correct node mapping for
+  verifying locate() queries.
 
   Note: Verification sorts the kmer array.
 
   Returns false if index verification fails, and true otherwise.
 */
-bool verifyIndex(const GCSA& index, const LCPArray* lcp, std::vector<KMer>& kmers, size_type kmer_length);
-bool verifyIndex(const GCSA& index, const LCPArray* lcp, const InputGraph& graph);
+bool verifyIndex(const GCSA& index, const LCPArray* lcp, std::vector<KMer>& kmers, size_type kmer_length,
+  const ConstructionParameters& parameters = ConstructionParameters());
+bool verifyIndex(const GCSA& index, const LCPArray* lcp, const InputGraph& graph,
+  const ConstructionParameters& parameters = ConstructionParameters());
 
 //------------------------------------------------------------------------------
 

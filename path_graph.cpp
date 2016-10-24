@@ -1029,6 +1029,58 @@ struct SameFromSet
   }
 };
 
+// Used to avoid templates in MergedGraph constructor.
+template<class NodeMapping>
+void
+mergeGraph(PathGraphMerger& merger, MergedGraph& target,
+  size_type kmer_order, size_type size_limit,
+  SameFromSet<NodeMapping>& same_from_set)
+{
+  WriteBuffer<PathNode>            path_file(target.path_name);
+  WriteBuffer<PathNode::rank_type> rank_file(target.rank_name);
+  WriteBuffer<range_type>          from_file(target.from_name);
+  WriteBuffer<uint8_t>             lcp_file(target.lcp_name);
+
+  size_type curr_comp = 0;  // Used to transform next.
+  size_type bytes = 0;
+  for(range_type range = merger.first(); !(merger.atEnd(range)); range = merger.next())
+  {
+    range_type path_lcp = merger.ranges.front().left_lcp; // Write this to the LCP array.
+    same_from_set.select(range);
+    range = merger.extendRange(same_from_set);
+    merger.mergePathNodes();
+    PriorityNode& curr = merger.buffer[range.second];
+    curr.node.from = same_from_set.nodes[0];
+
+    // Write the actual data
+    bytes += curr.node.bytes() + (same_from_set.nodes.size() - 1) * sizeof(range_type) + 1;
+    if(bytes > size_limit)
+    {
+      std::cerr << "mergeGraph(): Size limit exceeded, construction aborted" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    writePath(curr.node, curr.label, path_file, rank_file);
+    for(size_type i = 1; i < same_from_set.nodes.size(); i++)
+    {
+      from_file.push_back(range_type(target.path_count, same_from_set.nodes[i]));
+    }
+    lcp_file.push_back(path_lcp.first * kmer_order + path_lcp.second);
+
+    // Update the counts and the pointers to paths starting with each comp value.
+    while(curr.firstLabel(0) >= target.next[curr_comp])
+    {
+      target.next[curr_comp] = target.path_count;
+      target.next_from[curr_comp] = target.from_count;
+      curr_comp++;
+    }
+    target.path_count++;
+    target.rank_count += curr.node.ranks();
+    target.from_count += same_from_set.nodes.size() - 1;
+  }
+
+  path_file.close(); rank_file.close(); from_file.close(); lcp_file.close();
+}
+
 MergedGraph::MergedGraph(const PathGraph& source, const DeBruijnGraph& mapper, const LCP& kmer_lcp,
   const ConstructionParameters& parameters) :
   path_name(TempFile::getName(PREFIX)), rank_name(TempFile::getName(PREFIX)),
@@ -1037,11 +1089,6 @@ MergedGraph::MergedGraph(const PathGraph& source, const DeBruijnGraph& mapper, c
   order(source.k()),
   next(mapper.alpha.sigma + 1, 0), next_from(mapper.alpha.sigma + 1, 0)
 {
-  WriteBuffer<PathNode>            path_file(this->path_name);
-  WriteBuffer<PathNode::rank_type> rank_file(this->rank_name);
-  WriteBuffer<range_type>          from_file(this->from_name);
-  WriteBuffer<uint8_t>             lcp_file(this->lcp_name);
-
   /*
      Initialize next[comp] to be the the rank of the first kmer starting with
      the corresponding character. Later, next[comp] is transformed into the rank
@@ -1055,47 +1102,24 @@ MergedGraph::MergedGraph(const PathGraph& source, const DeBruijnGraph& mapper, c
   this->next_from[mapper.alpha.sigma] = ~(size_type)0;
 
   PathGraphMerger merger(source, kmer_lcp);
-  NodeIdentityMapping node_mapping;
-  SameFromSet<NodeIdentityMapping> same_from_set(merger, node_mapping);
-  size_type curr_comp = 0;  // Used to transform next.
-
-  size_type bytes = 0;
-  for(range_type range = merger.first(); !(merger.atEnd(range)); range = merger.next())
+  if(parameters.node_mapping == ConstructionParameters::identity_mapping)
   {
-    range_type path_lcp = merger.ranges.front().left_lcp; // Write this to the LCP array.
-    same_from_set.select(range);
-    range = merger.extendRange(same_from_set);
-    merger.mergePathNodes();
-    PriorityNode& curr = merger.buffer[range.second];
-    curr.node.from = same_from_set.nodes[0];
-
-    // Write the actual data
-    bytes += curr.node.bytes() + (same_from_set.nodes.size() - 1) * sizeof(range_type) + 1;
-    if(bytes > parameters.size_limit)
-    {
-      std::cerr << "MergedGraph::MergedGraph(): Size limit exceeded, construction aborted" << std::endl;
-      std::exit(EXIT_FAILURE);
-    }
-    writePath(curr.node, curr.label, path_file, rank_file);
-    for(size_type i = 1; i < same_from_set.nodes.size(); i++)
-    {
-      from_file.push_back(range_type(this->path_count, same_from_set.nodes[i]));
-    }
-    lcp_file.push_back(path_lcp.first * mapper.order() + path_lcp.second);
-
-    // Update the counts and the pointers to paths starting with each comp value.
-    while(curr.firstLabel(0) >= this->next[curr_comp])
-    {
-      this->next[curr_comp] = this->path_count;
-      this->next_from[curr_comp] = this->from_count;
-      curr_comp++;
-    }
-    this->path_count++;
-    this->rank_count += curr.node.ranks();
-    this->from_count += same_from_set.nodes.size() - 1;
+    NodeIdentityMapping node_mapping;
+    SameFromSet<NodeIdentityMapping> same_from_set(merger, node_mapping);
+    mergeGraph(merger, *this, mapper.order(), parameters.size_limit, same_from_set);
+  }
+  else if(parameters.node_mapping == ConstructionParameters::duplicate_mapping)
+  {
+    NodeDuplicateMapping node_mapping(parameters.max_node);
+    SameFromSet<NodeDuplicateMapping> same_from_set(merger, node_mapping);
+    mergeGraph(merger, *this, mapper.order(), parameters.size_limit, same_from_set);
+  }
+  else
+  {
+    std::cerr << "MergedGraph::MergedGraph(): Invalid node mapping: " << parameters.node_mapping << std::endl;
+    std::exit(EXIT_FAILURE);
   }
   merger.close();
-  path_file.close(); rank_file.close(); from_file.close(); lcp_file.close();
 
   if(Verbosity::level >= Verbosity::EXTENDED)
   {

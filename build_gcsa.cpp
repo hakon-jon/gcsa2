@@ -130,6 +130,11 @@ main(int argc, char** argv)
       std::exit(EXIT_FAILURE);
     }
   }
+  if(parameters.node_mapping != ConstructionParameters::identity_mapping && mapping_parameter.empty())
+  {
+    std::cerr << "build_gcsa: Mapping parameter must be specified with -M for non-identity node mappings" << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
   parameters.setMappingParameter(mapping_parameter);
   if(optind >= argc)
   {
@@ -218,7 +223,7 @@ main(int argc, char** argv)
   printHeader("Total size"); std::cout << inMegabytes(index_bytes + lcp_bytes) << " MB" << std::endl;
   std::cout << std::endl;
 
-  if(verify) { verifyIndex(index, &lcp, graph); }
+  if(verify) { verifyIndex(index, &lcp, graph, parameters); }
 
   std::cout << "Final memory usage: " << inGigabytes(memoryUsage()) << " GB" << std::endl;
   std::cout << std::endl;

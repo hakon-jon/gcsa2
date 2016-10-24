@@ -74,15 +74,10 @@ struct KMerSplitComparator
     }
 };
 
+template<class NodeMapping>
 bool
-verifyIndex(const GCSA& index, const LCPArray* lcp, const InputGraph& graph)
-{
-  std::vector<KMer> kmers; graph.read(kmers);
-  return verifyIndex(index, lcp, kmers, graph.k());
-}
-
-bool
-verifyIndex(const GCSA& index, const LCPArray* lcp, std::vector<KMer>& kmers, size_type kmer_length)
+verifyIndex(const GCSA& index, const LCPArray* lcp, std::vector<KMer>& kmers, size_type kmer_length,
+  const NodeMapping& node_mapping)
 {
   double start = readTimer();
 
@@ -165,7 +160,7 @@ verifyIndex(const GCSA& index, const LCPArray* lcp, std::vector<KMer>& kmers, si
 
       // count()
       std::vector<node_type> expected;
-      for(size_type j = i; j < next; j++) { expected.push_back(kmers[j].from); }
+      for(size_type j = i; j < next; j++) { node_mapping.add(expected, kmers[j].from); }
       removeDuplicates(expected, false);
       size_type unique_count = index.count(range);
       if(unique_count != expected.size())
@@ -234,6 +229,35 @@ verifyIndex(const GCSA& index, const LCPArray* lcp, std::vector<KMer>& kmers, si
   std::cout << std::endl;
 
   return fails == 0;
+}
+
+bool
+verifyIndex(const GCSA& index, const LCPArray* lcp, const InputGraph& graph,
+  const ConstructionParameters& parameters)
+{
+  std::vector<KMer> kmers; graph.read(kmers);
+  return verifyIndex(index, lcp, kmers, graph.k(), parameters);
+}
+
+bool
+verifyIndex(const GCSA& index, const LCPArray* lcp, std::vector<KMer>& kmers, size_type kmer_length,
+  const ConstructionParameters& parameters)
+{
+  if(parameters.node_mapping == ConstructionParameters::identity_mapping)
+  {
+    NodeIdentityMapping node_mapping;
+    return verifyIndex(index, lcp, kmers, kmer_length, node_mapping);
+  }
+  else if(parameters.node_mapping == ConstructionParameters::duplicate_mapping)
+  {
+    NodeDuplicateMapping node_mapping(parameters.max_node);
+    return verifyIndex(index, lcp, kmers, kmer_length, node_mapping);
+  }
+  else
+  {
+    std::cerr << "verifyIndex(): Invalid node mapping: " << parameters.node_mapping << std::endl;
+    return false;
+  }
 }
 
 //------------------------------------------------------------------------------

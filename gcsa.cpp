@@ -454,8 +454,8 @@ GCSA::GCSA(InputGraph& graph, const ConstructionParameters& parameters)
   sdsl::util::clear(keys);
 
   // Determine the existing from nodes.
-  std::vector<node_type> from_node_buffer;;
-  graph.readFrom(from_node_buffer);
+  std::vector<node_type> from_node_buffer;
+  graph.readFrom(from_node_buffer, parameters);
   sdsl::sd_vector<> from_nodes(from_node_buffer.begin(), from_node_buffer.end());
   sdsl::sd_vector<>::rank_1_type from_rank;
   sdsl::util::init_support(from_rank, &(from_nodes));
