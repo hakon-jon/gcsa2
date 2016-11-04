@@ -274,7 +274,8 @@ struct MergedGraphReader
   */
   bool intersect(const PathLabel& first, const PathLabel& last, size_type offset);
 
-  void fromNodes(std::vector<node_type>& results);
+  template<class NodeMapping>
+  void fromNodes(std::vector<node_type>& results, const NodeMapping& node_mapping);
 };
 
 void
@@ -409,16 +410,17 @@ MergedGraphReader::intersect(const PathLabel& first, const PathLabel& last, size
   }
 }
 
+template<class NodeMapping>
 void
-MergedGraphReader::fromNodes(std::vector<node_type>& results)
+MergedGraphReader::fromNodes(std::vector<node_type>& results, const NodeMapping& node_mapping)
 {
   results.clear();
-  results.push_back(this->paths[this->path].from);
+  node_mapping.add(results, this->paths[this->path].from);
 
   size_type old_pointer = this->from;
   while(this->from < this->from_nodes.size() && this->from_nodes[this->from].first == this->path)
   {
-    results.push_back(this->from_nodes[this->from].second); this->from++;
+    node_mapping.add(results, this->from_nodes[this->from].second); this->from++;
   }
   this->from = old_pointer;
 
@@ -426,6 +428,184 @@ MergedGraphReader::fromNodes(std::vector<node_type>& results)
 }
 
 //------------------------------------------------------------------------------
+
+template<class NodeMapping>
+range_type
+buildGCSA(GCSA& target, const MergedGraph& source,
+  DeBruijnGraph& mapper, sdsl::int_vector<0>& last_char,
+  sdsl::sd_vector<>& from_nodes, size_type unique_from_nodes,
+  const NodeMapping& node_mapping)
+{
+  // Structures used for building GCSA.
+  // The size of target.sample assumes that node_mapping produces a single value from each node.
+  sdsl::int_vector<64> counts(mapper.alpha.sigma, 0); // alpha
+  std::vector<sdsl::bit_vector> bwt(mapper.alpha.sigma); // fast_bwt, sparse_bwt
+  for(size_type comp = 0; comp < bwt.size(); comp++) { bwt[comp] = sdsl::bit_vector(source.size(), 0); }
+  CounterArray outdegrees(source.size(), 4); // edges
+  sdsl::bit_vector sampled_positions(source.size(), 0); // sampled_paths
+  std::vector<node_type> sample_buffer; // stored_samples
+  target.samples = sdsl::bit_vector(source.size() + source.extra(), 0);
+
+  // Structures used for building counting support.
+  // Invariant: The previous occurrence of from node x was at path prev_occ[from_rank(x)] - 1.
+  sdsl::sd_vector<>::rank_1_type from_rank;
+  sdsl::util::init_support(from_rank, &(from_nodes));
+  CounterArray occurrences(source.size(), 4), redundant(source.size() - 1, 4);
+  sdsl::int_vector<0> prev_occ(unique_from_nodes, 0, bit_length(source.size()));
+  std::vector<size_type> node_lcp, first_time, last_time;
+
+  // Read pointers to the MergedGraph files.
+  std::vector<MergedGraphReader> reader(mapper.alpha.sigma + 1);
+  reader[0].init(source, &mapper, &last_char);
+  for(size_type comp = 0; comp < mapper.alpha.sigma; comp++)
+  {
+    reader[comp + 1].init(source, comp);
+  }
+  ReadBuffer<uint8_t> lcp_array; lcp_array.open(source.lcp_name);
+
+  // The actual construction.
+  PathLabel first, last;
+  size_type total_edges = 0, sample_bits = 0;
+  std::vector<node_type> pred_from, curr_from;
+  for(size_type i = 0; i < source.size(); i++, reader[0].advance())
+  {
+    // Find the predecessors.
+    size_type indegree = 0, pred_comp = 0;
+    bool sample_this = false;
+    for(size_type comp = 0; comp < mapper.alpha.sigma; comp++)
+    {
+      if(!(reader[0].paths[reader[0].path].hasPredecessor(comp))) { continue; }
+
+      // Find the predecessor of paths[i] with comp and the path intersecting it.
+      reader[0].predecessor(comp, first, last);
+      if(!(reader[comp + 1].intersect(first, last, 0)))
+      {
+        reader[comp + 1].advance();
+      }
+
+      // Add the edge.
+      bwt[comp][i] = 1; counts[comp]++;
+      indegree++; outdegrees.increment(reader[comp + 1].path); total_edges++;
+      pred_comp = comp; // For sampling.
+    }
+
+    /*
+      Get the from nodes and update the occurrences/redundant arrays.
+
+      We traverse the ST in inorder using the LCP array. For each internal node, we
+      record the LCP value and the first and the last times (positions) we have
+      encountered that value within the subtree. If we have encountered the current
+      from node before, the LCA of the previous and current occurrences is the
+      highest ST node we have encountered after the previous occurrence. We then
+      increment the redundant array at the first encounter with that node.
+    */
+    reader[0].fromNodes(curr_from, node_mapping);
+    occurrences.increment(i, curr_from.size() - 1);
+    lcp_array.seek(i);
+    size_type curr_lcp = lcp_array[i] + (i > 0 ? 1 : 0); // Handle LCP[0] as -1.
+    while(!(node_lcp.empty()) && node_lcp.back() > curr_lcp)
+    {
+      node_lcp.pop_back(); first_time.pop_back(); last_time.pop_back();
+    }
+    if(!(node_lcp.empty()) && node_lcp.back() == curr_lcp) { last_time.back() = i; }
+    else { node_lcp.push_back(curr_lcp); first_time.push_back(i); last_time.push_back(i); }
+    for(size_type j = 0; j < curr_from.size(); j++)
+    {
+      size_type temp = from_rank(curr_from[j]);
+      if(prev_occ[temp] > 0)
+      {
+        size_type pos = std::lower_bound(last_time.begin(), last_time.end(), prev_occ[temp]) - last_time.begin();
+        redundant.increment(first_time[pos] - 1);
+      }
+      prev_occ[temp] = i + 1;
+    }
+
+    /*
+      Simple cases for sampling the node:
+      - multiple predecessors
+      - at the beginning of the source node with no real predecessors
+      - at the beginning of a node in the original graph (makes the previous case redundant)
+    */
+    if(indegree > 1) { sample_this = true; }
+    if(reader[0].paths[reader[0].path].hasPredecessor(Alphabet::SINK_COMP)) { sample_this = true; }
+    for(size_type k = 0; k < curr_from.size(); k++)
+    {
+      if(Node::offset(curr_from[k]) == 0) { sample_this = true; break; }
+    }
+
+    // Sample if the from nodes cannot be derived from the only predecessor.
+    if(!sample_this)
+    {
+      reader[pred_comp + 1].fromNodes(pred_from, node_mapping);
+      if(pred_from.size() != curr_from.size()) { sample_this = true; }
+      else
+      {
+        for(size_type k = 0; k < curr_from.size(); k++)
+        {
+          if(curr_from[k] != pred_from[k] + 1) { sample_this = true; break; }
+        }
+      }
+    }
+
+    // Store the samples.
+    if(sample_this)
+    {
+      sampled_positions[i] = 1;
+      for(size_type k = 0; k < curr_from.size(); k++)
+      {
+        sample_bits = std::max(sample_bits, bit_length(curr_from[k]));
+        sample_buffer.push_back(curr_from[k]);
+      }
+      target.samples[sample_buffer.size() - 1] = 1;
+    }
+  }
+  for(size_type i = 0; i < reader.size(); i++) { reader[i].close(); }
+  lcp_array.close();
+  sdsl::util::clear(last_char); sdsl::util::clear(from_nodes); sdsl::util::clear(prev_occ);
+  target.header.edges = total_edges;
+
+  // Initialize alpha.
+  target.alpha = Alphabet(counts, mapper.alpha.char2comp, mapper.alpha.comp2char);
+  sdsl::util::clear(mapper);
+
+  // Initialize extra_pointers and redundant_pointers.
+  size_type occ_count = occurrences.sum() + occurrences.size(), red_count = redundant.sum();
+  target.extra_pointers = SadaSparse(occurrences);
+  target.redundant_pointers = SadaCount(redundant);
+  sdsl::util::clear(occurrences); sdsl::util::clear(redundant);
+
+  // Initialize bwt.
+  target.fast_bwt.resize(target.alpha.sigma); target.fast_rank.resize(target.alpha.sigma);
+  target.sparse_bwt.resize(target.alpha.sigma); target.sparse_rank.resize(target.alpha.sigma);
+  target.sparse_bwt[0] = bwt[0]; sdsl::util::clear(bwt[0]);
+  for(size_type comp = 1; comp <= mapper.alpha.fast_chars; comp++)
+  {
+    target.fast_bwt[comp] = bwt[comp]; sdsl::util::clear(bwt[comp]);
+  }
+  for(size_type comp = mapper.alpha.fast_chars + 1; comp < mapper.alpha.sigma; comp++)
+  {
+    target.sparse_bwt[comp] = bwt[comp]; sdsl::util::clear(bwt[comp]);
+  }
+
+  // Initialize bitvectors (edges, sampled_positions, samples).
+  sdsl::bit_vector edge_buffer(total_edges, 0); total_edges = 0;
+  for(size_type i = 0; i < source.size(); i++)
+  {
+    total_edges += outdegrees[i];
+    edge_buffer[total_edges - 1] = 1;
+  }
+  outdegrees.clear();
+  target.edges = edge_buffer; sdsl::util::clear(edge_buffer);
+  target.sampled_paths = sampled_positions; sdsl::util::clear(sampled_positions);
+  target.samples.resize(sample_buffer.size());
+
+  // Initialize stored_samples.
+  target.stored_samples = sdsl::int_vector<0>(sample_buffer.size(), 0, sample_bits);
+  for(size_type i = 0; i < sample_buffer.size(); i++) { target.stored_samples[i] = sample_buffer[i]; }
+  sdsl::util::clear(sample_buffer);
+
+  return range_type(occ_count, red_count);
+}
 
 GCSA::GCSA(InputGraph& graph, const ConstructionParameters& parameters)
 {
@@ -457,8 +637,6 @@ GCSA::GCSA(InputGraph& graph, const ConstructionParameters& parameters)
   std::vector<node_type> from_node_buffer;
   graph.readFrom(from_node_buffer, parameters);
   sdsl::sd_vector<> from_nodes(from_node_buffer.begin(), from_node_buffer.end());
-  sdsl::sd_vector<>::rank_1_type from_rank;
-  sdsl::util::init_support(from_rank, &(from_nodes));
   size_type unique_from_nodes = from_node_buffer.size();
   sdsl::util::clear(from_node_buffer);
 
@@ -514,175 +692,28 @@ GCSA::GCSA(InputGraph& graph, const ConstructionParameters& parameters)
     start = stop;
   }
 
-  // Structures used for building GCSA.
+  // Actual construction.
   if(Verbosity::level >= Verbosity::BASIC)
   {
     std::cerr << "GCSA::GCSA(): Building the index" << std::endl;
   }
-  sdsl::int_vector<64> counts(graph.alpha.sigma, 0); // alpha
-  std::vector<bit_vector> bwt(graph.alpha.sigma); // fast_bwt, sparse_bwt
-  for(size_type comp = 0; comp < bwt.size(); comp++) { bwt[comp] = bit_vector(merged_graph.size(), 0); }
-  CounterArray outdegrees(merged_graph.size(), 4); // edges
-  bit_vector sampled_positions(merged_graph.size(), 0); // sampled_paths
-  std::vector<node_type> sample_buffer; // stored_samples
-  this->samples = bit_vector(merged_graph.size() + merged_graph.extra(), 0);
-
-  // Structures used for building counting support.
-  // Invariant: The previous occurrence of from node x was at path prev_occ[from_rank(x)] - 1.
-  CounterArray occurrences(merged_graph.size(), 4), redundant(merged_graph.size() - 1, 4);
-  sdsl::int_vector<0> prev_occ(unique_from_nodes, 0, bit_length(merged_graph.size()));
-  std::vector<size_type> node_lcp, first_time, last_time;
-
-  // Read pointers to the MergedGraph files.
-  std::vector<MergedGraphReader> reader(graph.alpha.sigma + 1);
-  reader[0].init(merged_graph, &mapper, &last_char);
-  for(size_type comp = 0; comp < graph.alpha.sigma; comp++)
+  range_type pointers;
+  if(parameters.node_mapping == ConstructionParameters::identity_mapping)
   {
-    reader[comp + 1].init(merged_graph, comp);
+    NodeIdentityMapping node_mapping;
+    pointers = buildGCSA(*this, merged_graph, mapper, last_char, from_nodes, unique_from_nodes, node_mapping);
   }
-  ReadBuffer<uint8_t> lcp_array; lcp_array.open(merged_graph.lcp_name);
-
-  // The actual construction.
-  PathLabel first, last;
-  size_type total_edges = 0, sample_bits = 0;
-  std::vector<node_type> pred_from, curr_from;
-  for(size_type i = 0; i < merged_graph.size(); i++, reader[0].advance())
+  else if(parameters.node_mapping == ConstructionParameters::duplicate_mapping)
   {
-    // Find the predecessors.
-    size_type indegree = 0, pred_comp = 0;
-    bool sample_this = false;
-    for(size_type comp = 0; comp < graph.alpha.sigma; comp++)
-    {
-      if(!(reader[0].paths[reader[0].path].hasPredecessor(comp))) { continue; }
-
-      // Find the predecessor of paths[i] with comp and the path intersecting it.
-      reader[0].predecessor(comp, first, last);
-      if(!(reader[comp + 1].intersect(first, last, 0)))
-      {
-        reader[comp + 1].advance();
-      }
-
-      // Add the edge.
-      bwt[comp][i] = 1; counts[comp]++;
-      indegree++; outdegrees.increment(reader[comp + 1].path); total_edges++;
-      pred_comp = comp; // For sampling.
-    }
-
-    /*
-      Get the from nodes and update the occurrences/redundant arrays.
-
-      We traverse the ST in inorder using the LCP array. For each internal node, we
-      record the LCP value and the first and the last times (positions) we have
-      encountered that value within the subtree. If we have encountered the current
-      from node before, the LCA of the previous and current occurrences is the
-      highest ST node we have encountered after the previous occurrence. We then
-      increment the redundant array at the first encounter with that node.
-    */
-    reader[0].fromNodes(curr_from);
-    occurrences.increment(i, curr_from.size() - 1);
-    lcp_array.seek(i);
-    size_type curr_lcp = lcp_array[i] + (i > 0 ? 1 : 0); // Handle LCP[0] as -1.
-    while(!(node_lcp.empty()) && node_lcp.back() > curr_lcp)
-    {
-      node_lcp.pop_back(); first_time.pop_back(); last_time.pop_back();
-    }
-    if(!(node_lcp.empty()) && node_lcp.back() == curr_lcp) { last_time.back() = i; }
-    else { node_lcp.push_back(curr_lcp); first_time.push_back(i); last_time.push_back(i); }
-    for(size_type j = 0; j < curr_from.size(); j++)
-    {
-      size_type temp = from_rank(curr_from[j]);
-      if(prev_occ[temp] > 0)
-      {
-        size_type pos = std::lower_bound(last_time.begin(), last_time.end(), prev_occ[temp]) - last_time.begin();
-        redundant.increment(first_time[pos] - 1);
-      }
-      prev_occ[temp] = i + 1;
-    }
-
-    /*
-      Simple cases for sampling the node:
-      - multiple predecessors
-      - at the beginning of the source node with no real predecessors
-      - at the beginning of a node in the original graph (makes the previous case redundant)
-    */
-    if(indegree > 1) { sample_this = true; }
-    if(reader[0].paths[reader[0].path].hasPredecessor(Alphabet::SINK_COMP)) { sample_this = true; }
-    for(size_type k = 0; k < curr_from.size(); k++)
-    {
-      if(Node::offset(curr_from[k]) == 0) { sample_this = true; break; }
-    }
-
-    // Sample if the from nodes cannot be derived from the only predecessor.
-    if(!sample_this)
-    {
-      reader[pred_comp + 1].fromNodes(pred_from);
-      if(pred_from.size() != curr_from.size()) { sample_this = true; }
-      else
-      {
-        for(size_type k = 0; k < curr_from.size(); k++)
-        {
-          if(curr_from[k] != pred_from[k] + 1) { sample_this = true; break; }
-        }
-      }
-    }
-
-    // Store the samples.
-    if(sample_this)
-    {
-      sampled_positions[i] = 1;
-      for(size_type k = 0; k < curr_from.size(); k++)
-      {
-        sample_bits = std::max(sample_bits, bit_length(curr_from[k]));
-        sample_buffer.push_back(curr_from[k]);
-      }
-      this->samples[sample_buffer.size() - 1] = 1;
-    }
+    NodeDuplicateMapping node_mapping(parameters.max_node);
+    pointers = buildGCSA(*this, merged_graph, mapper, last_char, from_nodes, unique_from_nodes, node_mapping);
   }
-  for(size_type i = 0; i < reader.size(); i++) { reader[i].close(); }
-  lcp_array.close();
-  sdsl::util::clear(last_char); sdsl::util::clear(from_nodes); sdsl::util::clear(prev_occ);
-  this->header.edges = total_edges;
-
-  // Initialize alpha.
-  this->alpha = Alphabet(counts, graph.alpha.char2comp, graph.alpha.comp2char);
-  sdsl::util::clear(mapper);
-
-  // Initialize extra_pointers and redundant_pointers.
-  size_type occ_count = occurrences.sum() + occurrences.size(), red_count = redundant.sum();
-  this->extra_pointers = SadaSparse(occurrences);
-  this->redundant_pointers = SadaCount(redundant);
-  sdsl::util::clear(occurrences); sdsl::util::clear(redundant);
-
-  // Initialize bwt.
-  this->fast_bwt.resize(this->alpha.sigma); this->fast_rank.resize(this->alpha.sigma);
-  this->sparse_bwt.resize(this->alpha.sigma); this->sparse_rank.resize(this->alpha.sigma);
-  this->sparse_bwt[0] = bwt[0]; sdsl::util::clear(bwt[0]);
-  for(size_type comp = 1; comp <= graph.alpha.fast_chars; comp++)
+  else
   {
-    this->fast_bwt[comp] = bwt[comp]; sdsl::util::clear(bwt[comp]);
+    std::cerr << "GCSA::GCSA(): Invalid node mapping: " << parameters.node_mapping << std::endl;
+    std::exit(EXIT_FAILURE);
   }
-  for(size_type comp = graph.alpha.fast_chars + 1; comp < graph.alpha.sigma; comp++)
-  {
-    this->sparse_bwt[comp] = bwt[comp]; sdsl::util::clear(bwt[comp]);
-  }
-
-  // Initialize bitvectors (edges, sampled_positions, samples).
-  bit_vector edge_buffer(total_edges, 0); total_edges = 0;
-  for(size_type i = 0; i < merged_graph.size(); i++)
-  {
-    total_edges += outdegrees[i];
-    edge_buffer[total_edges - 1] = 1;
-  }
-  outdegrees.clear();
-  this->edges = edge_buffer; sdsl::util::clear(edge_buffer);
-  this->sampled_paths = sampled_positions; sdsl::util::clear(sampled_positions);
-  this->samples.resize(sample_buffer.size());
   this->initSupport();
-
-  // Initialize stored_samples.
-  this->stored_samples = sdsl::int_vector<0>(sample_buffer.size(), 0, sample_bits);
-  for(size_type i = 0; i < sample_buffer.size(); i++) { this->stored_samples[i] = sample_buffer[i]; }
-  sdsl::util::clear(sample_buffer);
 
   // Transfer the LCP array from MergedGraph to InputGraph.
   TempFile::remove(graph.lcp_name);
@@ -698,7 +729,7 @@ GCSA::GCSA(InputGraph& graph, const ConstructionParameters& parameters)
   if(Verbosity::level >= Verbosity::BASIC)
   {
     std::cerr << "GCSA::GCSA(): " << this->size() << " paths, " << this->edgeCount() << " edges" << std::endl;
-    std::cerr << "GCSA::GCSA(): " << occ_count << " pointers (" << red_count << " redundant)" << std::endl;
+    std::cerr << "GCSA::GCSA(): " << pointers.first << " pointers (" << pointers.second << " redundant)" << std::endl;
     std::cerr << "GCSA::GCSA(): " << this->sampleCount() << " samples at "
               << this->sampledPositions() << " positions" << std::endl;
   }
